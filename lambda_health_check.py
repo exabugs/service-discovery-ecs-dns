@@ -16,7 +16,8 @@ import socket
 
 ecs_clusters = []
 check_health = True
-check_health_path = '/health'
+check_health_path = ''
+dns_name = 'servicediscovery.internal'
 
 ####################
 
@@ -25,18 +26,18 @@ print('Loading function')
 route53 = boto3.client('route53')
 ecs = boto3.client('ecs')
 ec2 = boto3.client('ec2')
-response = route53.list_hosted_zones_by_name(DNSName='servicediscovery.internal')
+response = route53.list_hosted_zones_by_name(DNSName=dns_name)
 if len(response['HostedZones']) == 0:
     raise Exception('Zone not found')
 hostedZoneId = response['HostedZones'][0]['Id']
 
 def get_ip_port(rr):
     try:
-        ip = socket.gethostbyname(rr['Value'].split(' ')[3])
-        return [ip, rr['Value'].split(' ')[2]]
+        ip = socket.gethostbyname(rr['Value'])
+        return ip
     except:
-        return [None, None] 
-    
+        return None
+
 def check_health(ip, port):
     try:
         conn = httplib.HTTPConnection(ip, int(port), timeout=2)
@@ -44,26 +45,32 @@ def check_health(ip, port):
         r1 = conn.getresponse()
         if r1.status != 200:
             return "ERROR"
-    except:
+    except Exception as e:
+        print(e)
         return "ERROR"
+
 
 def search_ecs_instance(ip, list_ec2_instances):
     for ec2Instance in list_ec2_instances:
         if list_ec2_instances[ec2Instance]['privateIP'] == ip:
             return list_ec2_instances[ec2Instance]['instanceArn']
-    
-def search_task(port, ec2Instance, service, list_tasks):
+
+
+def search_task(ec2Instance, record, list_tasks):
     for task in list_tasks:
-        if list_tasks[task]['instance'] == ec2Instance and {'service': service, 'port': port} in list_tasks[task]['containers']:
-            return task
-        
-def search_ecs_task(ip, port, service, ecs_data):
+        if list_tasks[task]['instance'] == ec2Instance:
+            for container in list_tasks[task]['containers']:
+                if container['service'] != None and container['service'] + '.' + dns_name + '.' == record['Name']:
+                    return task, container['port']
+    return None, None
+
+
+def search_ecs_task(ip, record, ecs_data):
     ec2Instance = search_ecs_instance(ip, ecs_data['ec2Instances'])
     if ec2Instance != None:
-        task = search_task(port, ec2Instance, service, ecs_data['tasks'])
-        if task != None:
-            return task
-    
+        return search_task(ec2Instance, record, ecs_data['tasks'])
+
+
 def delete_route53_record(record):
     route53.change_resource_record_sets(
         HostedZoneId=hostedZoneId,
@@ -76,19 +83,24 @@ def delete_route53_record(record):
                 }
             ]
         })
-        
+
+
 def process_records(response, ecs_data):
     for record in response['ResourceRecordSets']:
-        if record['Type'] == 'SRV':
+        if record['Type'] == 'CNAME':
             for rr in record['ResourceRecords']:
-                [ip, port] = get_ip_port(rr)
-                if ip != None:
-                    task=search_ecs_task(ip, port, record['Name'].split('.')[0], ecs_data)
+                ip = get_ip_port(rr)
+                if ip == None:
+                    delete_route53_record(record)
+                    print("Record %s deleted" % rr)
+                    break
+                else:
+                    task, port = search_ecs_task(ip, record, ecs_data)
                     if task == None:
                         delete_route53_record(record)
                         print("Record %s deleted" % rr)
                         break
-                        
+
                     if check_health:
                         result = "Initial"
                         retries = 3
@@ -105,8 +117,7 @@ def process_records(response, ecs_data):
                                     reason='Service Discovery Health Check failed'
                                 )
                                 print("Task %s stopped" % task)
-                    
-    
+
     if response['IsTruncated']:
         if 'NextRecordIdentifier' in response.keys():
             new_response = route53.list_resource_record_sets(
@@ -133,13 +144,13 @@ def get_ecs_data():
     for cluster_name in ecs_clusters:
         response = ecs.list_container_instances(cluster=cluster_name)
         list_instance_arns = {}
+        list_ec2_instances = {}
         for instance_arn in response['containerInstanceArns']:
             list_instance_arns[instance_arn] = {'cluster': cluster_name}
         if len(list_instance_arns.keys()) > 0:
             response = ecs.describe_container_instances(
                 cluster=cluster_name,
                 containerInstances=list_instance_arns.keys())
-            list_ec2_instances = {}
             for instance in response['containerInstances']:
                 list_ec2_instances[instance['ec2InstanceId']] = {'instanceArn': instance['containerInstanceArn']}
                 list_instance_arns[instance['containerInstanceArn']]['instanceId'] = instance['ec2InstanceId']

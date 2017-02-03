@@ -6,20 +6,21 @@ package main
 // or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
 
 import (
-	"fmt"
+	"errors"
+	"flag"
+	"io/ioutil"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatchevents"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/fsouza/go-dockerclient"
-	"github.com/aws/aws-sdk-go/service/cloudwatchevents"
-	"net/http"
-	"io/ioutil"
-	"strconv"
-	"strings"
-	"time"
-	"flag"
 )
 
 const workerTimeout = 180 * time.Second
@@ -96,7 +97,9 @@ func (e *dockerRouter) manageEvents() {
 type worker struct{}
 
 func (w *worker) doWork(event *docker.APIEvents, e *dockerRouter) {
-	defer func() { e.workers <- w }()
+	defer func() {
+		e.workers <- w
+	}()
 	if handlers, ok := e.handlers[event.Status]; ok {
 		log.Infof("Processing event: %#v", event)
 		for _, handler := range handlers {
@@ -118,7 +121,7 @@ func (th *dockerHandler) Handle(event *docker.APIEvents) error {
 type config struct {
 	HostedZoneId string
 	Hostname     string
-	Region		 string
+	Region       string
 }
 
 var configuration config
@@ -159,6 +162,11 @@ type ServiceInfo struct {
 	Port string
 }
 
+type ImageInfo struct {
+	Name            string
+	TagImageOptions docker.TagImageOptions
+}
+
 func getDNSHostedZoneId() (string, error) {
 	r53 := route53.New(session.New())
 	params := &route53.ListHostedZonesByNameInput{
@@ -178,7 +186,7 @@ func getDNSHostedZoneId() (string, error) {
 
 func createDNSRecord(serviceName string, dockerId string, port string) error {
 	r53 := route53.New(session.New())
-	srvRecordName := serviceName + "." + DNSName
+	cnameRecordName := serviceName + "." + DNSName
 	// This API call creates a new DNS record for this service
 	params := &route53.ChangeResourceRecordSetsInput{
 		ChangeBatch: &route53.ChangeBatch{
@@ -186,16 +194,16 @@ func createDNSRecord(serviceName string, dockerId string, port string) error {
 				{
 					Action: aws.String(route53.ChangeActionCreate),
 					ResourceRecordSet: &route53.ResourceRecordSet{
-						Name: aws.String(srvRecordName),
+						Name: aws.String(cnameRecordName),
 						// It creates a SRV record with the name of the service
-						Type: aws.String(route53.RRTypeSrv),
+						Type: aws.String(route53.RRTypeCname),
 						ResourceRecords: []*route53.ResourceRecord{
 							{
 								// priority: the priority of the target host, lower value means more preferred
 								// weight: A relative weight for records with the same priority, higher value means more preferred
 								// port: the TCP or UDP port on which the service is to be found
 								// target: the canonical hostname of the machine providing the service
-								Value: aws.String("1 1 " + port + " " + configuration.Hostname),
+								Value: aws.String(configuration.Hostname),
 							},
 						},
 						SetIdentifier: aws.String(dockerId),
@@ -211,7 +219,7 @@ func createDNSRecord(serviceName string, dockerId string, port string) error {
 	}
 	_, err := r53.ChangeResourceRecordSets(params)
 	logErrorNoFatal(err)
-	fmt.Println("Record " + srvRecordName + " created (1 1 " + port + " " + configuration.Hostname + ")")
+	log.Info("Record " + cnameRecordName + " created (" + configuration.Hostname + ")")
 	return err
 }
 
@@ -225,7 +233,7 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 		MaxItems:              aws.String("10"),
 		StartRecordIdentifier: aws.String(dockerId),
 		StartRecordName:       aws.String(srvRecordName),
-		StartRecordType:       aws.String(route53.RRTypeSrv),
+		StartRecordType:       aws.String(route53.RRTypeCname),
 	}
 	resp, err := r53.ListResourceRecordSets(paramsList)
 	logErrorNoFatal(err)
@@ -234,7 +242,7 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 	}
 	srvValue := ""
 	for _, rrset := range resp.ResourceRecordSets {
-		if *rrset.SetIdentifier == dockerId && (*rrset.Name == srvRecordName || *rrset.Name == srvRecordName+".") {
+		if *rrset.SetIdentifier == dockerId && (*rrset.Name == srvRecordName || *rrset.Name == srvRecordName + ".") {
 			for _, rrecords := range rrset.ResourceRecords {
 				srvValue = aws.StringValue(rrecords.Value)
 				break
@@ -254,7 +262,7 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 					Action: aws.String(route53.ChangeActionDelete),
 					ResourceRecordSet: &route53.ResourceRecordSet{
 						Name: aws.String(srvRecordName),
-						Type: aws.String(route53.RRTypeSrv),
+						Type: aws.String(route53.RRTypeCname),
 						ResourceRecords: []*route53.ResourceRecord{
 							{
 								Value: aws.String(srvValue),
@@ -271,7 +279,7 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 	}
 	_, err = r53.ChangeResourceRecordSets(params)
 	logErrorNoFatal(err)
-	fmt.Println("Record " + srvRecordName + " deleted ( " + srvValue + ")")
+	log.Info("Record " + srvRecordName + " deleted ( " + srvValue + ")")
 	return err
 }
 
@@ -289,12 +297,9 @@ func getNetworkPortAndServiceName(container *docker.Container, includePort bool)
 		if len(envEval) == 2 && len(nameEval) == 3 && nameEval[0] == "SERVICE" && nameEval[2] == "NAME" {
 			if _, err := strconv.Atoi(nameEval[1]); err == nil {
 				if includePort {
-					for srcPort, mapping := range container.NetworkSettings.Ports {
-						portEval := strings.Split(string(srcPort), "/")
-						if len(portEval) > 0 && portEval[0] == nameEval[1] {
-							if len(mapping) > 0 {
-								svc = append(svc, ServiceInfo{envEval[1], mapping[0].HostPort})
-							}
+					for _, mapping := range container.NetworkSettings.Ports {
+						if len(mapping) > 0 && nameEval[1] == mapping[0].HostPort {
+							svc = append(svc, ServiceInfo{envEval[1], mapping[0].HostPort})
 						}
 					}
 				} else {
@@ -306,20 +311,20 @@ func getNetworkPortAndServiceName(container *docker.Container, includePort bool)
 	return svc
 }
 
-func sendToCWEvents (detail string, detailType string, resource string, source string) error {
+func sendToCWEvents(detail string, detailType string, resource string, source string) error {
 	config := aws.NewConfig().WithRegion(configuration.Region)
 	sess := session.New(config)
 	svc := cloudwatchevents.New(sess)
 	params := &cloudwatchevents.PutEventsInput{
 		Entries: []*cloudwatchevents.PutEventsRequestEntry{
 			{
-				Detail: aws.String(detail),
+				Detail:     aws.String(detail),
 				DetailType: aws.String(detailType),
 				Resources: []*string{
 					aws.String(resource),
 				},
 				Source: aws.String(source),
-				Time: aws.Time(time.Now()),
+				Time:   aws.Time(time.Now()),
 			},
 		},
 	}
@@ -349,7 +354,7 @@ func main() {
 	var zoneId string
 
 	var sendEvents = flag.Bool("cw-send-events", false, "Send CloudWatch events when a container is created or terminated")
-	
+
 	flag.Parse()
 
 	var DNSNameArg = flag.Arg(0)
@@ -402,9 +407,23 @@ func main() {
 		}
 		if *sendEvents {
 			taskArn := getTaskArn(event.ID)
-			sendToCWEvents(`{ "dockerId": "` + event.ID + `","TaskArn":"` + taskArn + `" }`, "Task Started", configuration.Hostname, "awslabs.ecs.container" )
+			sendToCWEvents(`{ "dockerId": "` + event.ID + `","TaskArn":"` + taskArn + `" }`, "Task Started", configuration.Hostname, "awslabs.ecs.container")
 		}
-		fmt.Println("Docker " + event.ID + " started")
+		log.Info("Docker " + event.ID + " started")
+
+		// tagging images
+		image, err := getImageForTag(container)
+		if err == nil {
+			for i := 0; i <= 8; i += 2 {
+				if err = dockerClient.TagImage(image.Name, image.TagImageOptions); err == nil {
+					break
+				}
+				time.Sleep(time.Duration(sum) * time.Second)
+			}
+			if *sendEvents {
+				sendToCWEvents(`{ "dockerId": "` + event.ID + `", "tagName": "` + image.Name + `" }`, "docker tag created", configuration.Hostname, "awslabs.ecs.container")
+			}
+		}
 		return nil
 	}
 
@@ -431,9 +450,23 @@ func main() {
 		}
 		if *sendEvents {
 			taskArn := getTaskArn(event.ID)
-			sendToCWEvents(`{ "dockerId": "` + event.ID + `","TaskArn":"` + taskArn + `" }`, "Task Stopped", configuration.Hostname, "awslabs.ecs.container" )
+			sendToCWEvents(`{ "dockerId": "` + event.ID + `","TaskArn":"` + taskArn + `" }`, "Task Stopped", configuration.Hostname, "awslabs.ecs.container")
 		}
-		fmt.Println("Docker " + event.ID + " stopped")
+		log.Info("Docker " + event.ID + " stopped")
+
+		// tagging images
+		image, err := getImageForTag(container)
+		if err == nil {
+			for i := 0; i <= 8; i += 2 {
+				if err = dockerClient.RemoveImage(image.Name); err == nil {
+					break
+				}
+				time.Sleep(time.Duration(sum) * time.Second)
+			}
+			if *sendEvents {
+				sendToCWEvents(`{ "dockerId": "` + event.ID + `", "tagName": "` + image.Name + `" }`, "docker tag created", configuration.Hostname, "awslabs.ecs.container")
+			}
+		}
 		return nil
 	}
 
@@ -450,6 +483,23 @@ func main() {
 	logErrorAndFail(err)
 	defer router.stop()
 	router.start()
-	fmt.Println("Waiting events")
+	log.Info("Waiting events")
 	select {}
+}
+func getImageForTag(container *docker.Container) (ImageInfo, error) {
+	var img ImageInfo
+	for _, env := range container.Config.Env {
+		envVal := strings.Split(env, "=")
+		if len(envVal) == 2 && envVal[0] == "CREATE_TAG_FROM_IMAGE" {
+			img = ImageInfo{
+				Name: container.Image,
+				TagImageOptions: docker.TagImageOptions{
+					Repo: envVal[1],
+				},
+			}
+			return img, nil
+
+		}
+	}
+	return img, errors.New("no image for tag")
 }

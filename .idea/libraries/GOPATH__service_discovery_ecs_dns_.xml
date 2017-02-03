@@ -1,0 +1,30 @@
+<component name="libraryTable">
+  <library name="GOPATH &lt;service-discovery-ecs-dns&gt;">
+    <CLASSES>
+      <root url="file://$USER_HOME$/.go/src/cloud.google.com" />
+      <root url="file://$USER_HOME$/.go/src/gopkg.in" />
+      <root url="file://$USER_HOME$/.go/src/bitbucket.org" />
+      <root url="file://$USER_HOME$/.go/src/gitlab.com" />
+      <root url="file://$USER_HOME$/.go/src/golang.org" />
+      <root url="file://$USER_HOME$/.go/src/google.golang.org" />
+      <root url="file://$USER_HOME$/.go/src/github.com" />
+      <root url="file://$USER_HOME$/.go/src/9fans.net" />
+      <root url="file://$USER_HOME$/.go/src/chat" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES>
+      <root url="file://$USER_HOME$/.go/src/cloud.google.com" />
+      <root url="file://$USER_HOME$/.go/src/gopkg.in" />
+      <root url="file://$USER_HOME$/.go/src/bitbucket.org" />
+      <root url="file://$USER_HOME$/.go/src/gitlab.com" />
+      <root url="file://$USER_HOME$/.go/src/golang.org" />
+      <root url="file://$USER_HOME$/.go/src/google.golang.org" />
+      <root url="file://$USER_HOME$/.go/src/github.com" />
+      <root url="file://$USER_HOME$/.go/src/9fans.net" />
+      <root url="file://$USER_HOME$/.go/src/chat" />
+    </SOURCES>
+    <excluded>
+      <root url="file://$PROJECT_DIR$" />
+    </excluded>
+  </library>
+</component>

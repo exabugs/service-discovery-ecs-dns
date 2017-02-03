@@ -9,9 +9,10 @@ Some of the tenets are:
 * Automatically register/de-register services when started/stopped
 * Load balance access to services
 * Monitor the health of the service
+* Automatically create/remove tag for docker image of created container
 
 ## Installation
-You need a private hosted zone in Route53 to register all the containers for each service. 
+You need a private hosted zone in Route53 to register all the containers for each service.
 
 To create an ECS Cluster with all the required configuration and the Route53 domain and the example micro-services you can use the CloudFormation template "Service_Discovery_Using_DNS.template".
 
@@ -28,34 +29,28 @@ Create a lambda function using the code in lambda_health_check.py, you can modif
 You should then schedule the Lambda funtion to run every 5 minutes.
 
 ## Usage
+
+### Attach Ports
+
 Once the cluster is created, you can start launching tasks and services into the ECS Cluster. For each task you want to register as a MicroService, you should specify an Environment variable in the Task definition, the name of the variable should be SERVICE_\<port>_NAME, where \<port> is the port where your service is going to listen inside the container, and the value is the name of the microservice. You can define multiple services per container using different ports.
 
 You should publish the port of the container using the portMappings properties. When you publish the port I recommend you to not specify the hostPort and leave it to be assigned randomly, this way you could have multiple containers of the same service running in the same server.
 
-When the service starts, and the container is launched in one of the servers, the ecssd agent registers a new DNS record automatically, with the name <serviceName>.servicediscovery.internal and the type SRV.
+When the service starts, and the container is launched in one of the servers, the ecssd agent registers a new DNS record automatically, with the name <serviceName>.servicediscovery.internal and the type CNAME.
 
-You can use this name to access the service from your consumers, Route53 balances the requests between your different containers for the same service. For example in go you can use:
+You can use this name to access the service from your consumers, Route53 balances the requests between your different containers for the same service.
 
-```golang
-func getServiceEnpoint() (string, error) {
-	var addrs []*net.SRV
-  	var err error
-	if _, addrs, err = net.LookupSRV("", "", "serviceName.servicediscovery.internal"); err != nil {
-		return "", err
-	}
-	for _, addr := range addrs {
-		return strings.TrimRight(addr.Target, ".") + ":" + strconv.Itoa(int(addr.Port)), nil
-	}
-	return "", errors.New("No record found")
-}
-```
+### Tagging docker image
+
+At the same time as container created, For each task you want to create a tag which same as container's image, you should specify an Environment variable in the Task Definition, the name of the variable should be CREATE_TAG_FROM_IMAGE, and the value is the name of the tag you want to create. You can define only one tag per container right now.
+
 
 ## Example
 
 We've included an example of usage of the service discovery, the example is composed of the following containers:
 
 * time: This container is a web service receiving a string with a time format, and returns the current time in that format. The format is a combination of the following date: "Mon Jan 2 15:04:05 -0700 MST 2006", for example: "15:04 Jan 2".
-To test the service you can use: 
+To test the service you can use:
 ```
 curl -u admin:password 127.0.0.1:32804/time/15:04%20Jan%202
 ```
